@@ -89,7 +89,10 @@ pub trait DataTypeExt {
 impl DataTypeExt for DataType {
     fn is_binary_like(&self) -> bool {
         use DataType::*;
-        matches!(self, Utf8 | Binary | LargeUtf8 | LargeBinary)
+        matches!(
+            self,
+            Utf8 | Binary | LargeUtf8 | LargeBinary | Utf8View | BinaryView
+        )
     }
 
     fn is_struct(&self) -> bool {
@@ -459,7 +462,11 @@ pub fn iter_str_array(arr: &dyn Array) -> Box<dyn Iterator<Item = Option<&str>> 
     match arr.data_type() {
         DataType::Utf8 => Box::new(arr.as_string::<i32>().iter()),
         DataType::LargeUtf8 => Box::new(arr.as_string::<i64>().iter()),
-        _ => panic!("Expecting Utf8 or LargeUtf8, found {:?}", arr.data_type()),
+        DataType::Utf8View => Box::new(arr.as_string_view().iter()),
+        _ => panic!(
+            "Expecting Utf8, LargeUtf8 or Utf8View, found {:?}",
+            arr.data_type()
+        ),
     }
 }
 
@@ -1555,7 +1562,7 @@ impl BufferExt for arrow_buffer::Buffer {
 mod tests {
     use super::*;
     use arrow_array::{new_empty_array, new_null_array, ListArray, StringArray};
-    use arrow_array::{Float32Array, Int32Array, StructArray};
+    use arrow_array::{Float32Array, Int32Array, StringViewArray, StructArray};
     use arrow_buffer::OffsetBuffer;
 
     #[test]
@@ -2519,5 +2526,67 @@ mod tests {
             innermost_struct.column(1).as_ref(),
             &Int32Array::from(vec![1, 2]) as &dyn Array
         );
+    }
+
+    #[test]
+    fn test_iter_str_array_utf8view_with_nulls() {
+        // Test Utf8View iteration with nulls
+        let values: Vec<Option<&str>> = vec![
+            Some("hello"),
+            None,
+            Some("world"),
+            None,
+            Some(""),
+            Some("test"),
+        ];
+        let array = StringViewArray::from(values);
+        let mut iter = iter_str_array(&array);
+
+        assert_eq!(iter.next(), Some(Some("hello")));
+        assert_eq!(iter.next(), Some(None));
+        assert_eq!(iter.next(), Some(Some("world")));
+        assert_eq!(iter.next(), Some(None));
+        assert_eq!(iter.next(), Some(Some("")));
+        assert_eq!(iter.next(), Some(Some("test")));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iter_str_array_utf8view_large_strings() {
+        // Test Utf8View with large strings
+        let large_str = "a".repeat(1000);
+        let x_repeated = "x".repeat(500);
+        let values = vec![
+            large_str.as_str(),
+            "medium",
+            "small",
+            "",
+            x_repeated.as_str(),
+        ];
+        let array = StringViewArray::from(values);
+        let mut iter = iter_str_array(&array);
+
+        let first = iter.next().unwrap().unwrap();
+        assert_eq!(first.len(), 1000);
+        assert_eq!(iter.next(), Some(Some("medium")));
+        assert_eq!(iter.next(), Some(Some("small")));
+        assert_eq!(iter.next(), Some(Some("")));
+
+        let last = iter.next().unwrap().unwrap();
+        assert_eq!(last.len(), 500);
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn test_iter_str_array_all_nulls_utf8view() {
+        // Test Utf8View array with all nulls
+        let values: Vec<Option<&str>> = vec![None, None, None];
+        let array = StringViewArray::from(values);
+        let mut iter = iter_str_array(&array);
+
+        assert_eq!(iter.next(), Some(None));
+        assert_eq!(iter.next(), Some(None));
+        assert_eq!(iter.next(), Some(None));
+        assert_eq!(iter.next(), None);
     }
 }

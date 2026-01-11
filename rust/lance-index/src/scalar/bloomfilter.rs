@@ -286,11 +286,17 @@ impl BloomFilterIndex {
                     datafusion_common::ScalarValue::LargeUtf8(Some(val)) => {
                         Ok(sbbf.check(val.as_str()))
                     }
+                    datafusion_common::ScalarValue::Utf8View(Some(val)) => {
+                        Ok(sbbf.check(val.as_str()))
+                    }
                     // Binary types
                     datafusion_common::ScalarValue::Binary(Some(val)) => {
                         Ok(sbbf.check(val.as_slice()))
                     }
                     datafusion_common::ScalarValue::LargeBinary(Some(val)) => {
+                        Ok(sbbf.check(val.as_slice()))
+                    }
+                    datafusion_common::ScalarValue::BinaryView(Some(val)) => {
                         Ok(sbbf.check(val.as_slice()))
                     }
                     // Date and time types
@@ -358,11 +364,17 @@ impl BloomFilterIndex {
                         datafusion_common::ScalarValue::LargeUtf8(Some(val)) => {
                             sbbf.check(val.as_str())
                         }
+                        datafusion_common::ScalarValue::Utf8View(Some(val)) => {
+                            sbbf.check(val.as_str())
+                        }
                         // Binary types
                         datafusion_common::ScalarValue::Binary(Some(val)) => {
                             sbbf.check(val.as_slice())
                         }
                         datafusion_common::ScalarValue::LargeBinary(Some(val)) => {
+                            sbbf.check(val.as_slice())
+                        }
+                        datafusion_common::ScalarValue::BinaryView(Some(val)) => {
                             sbbf.check(val.as_slice())
                         }
                         // Date and time types
@@ -757,6 +769,18 @@ impl BloomFilterProcessor {
         has_null
     }
 
+    fn process_string_view_array(sbbf: &mut Sbbf, array: &arrow_array::StringViewArray) -> bool {
+        let mut has_null = false;
+        for i in 0..array.len() {
+            if array.is_valid(i) {
+                sbbf.insert(array.value(i));
+            } else {
+                has_null = true;
+            }
+        }
+        has_null
+    }
+
     fn process_binary_array(sbbf: &mut Sbbf, array: &arrow_array::BinaryArray) -> bool {
         let mut has_null = false;
         for i in 0..array.len() {
@@ -770,6 +794,18 @@ impl BloomFilterProcessor {
     }
 
     fn process_large_binary_array(sbbf: &mut Sbbf, array: &arrow_array::LargeBinaryArray) -> bool {
+        let mut has_null = false;
+        for i in 0..array.len() {
+            if array.is_valid(i) {
+                sbbf.insert(array.value(i));
+            } else {
+                has_null = true;
+            }
+        }
+        has_null
+    }
+
+    fn process_binary_view_array(sbbf: &mut Sbbf, array: &arrow_array::BinaryViewArray) -> bool {
         let mut has_null = false;
         for i in 0..array.len() {
             if array.is_valid(i) {
@@ -971,6 +1007,18 @@ impl ZoneProcessor for BloomFilterProcessor {
                     .unwrap();
                 Self::process_large_string_array(sbbf, typed_array)
             }
+            DataType::Utf8View => {
+                let typed_array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringViewArray>()
+                    .ok_or_else(|| {
+                        Error::invalid_input(
+                            "Expected StringViewArray for Utf8View type",
+                            location!(),
+                        )
+                    })?;
+                Self::process_string_view_array(sbbf, typed_array)
+            }
             DataType::Binary => {
                 let typed_array = array
                     .as_any()
@@ -984,6 +1032,18 @@ impl ZoneProcessor for BloomFilterProcessor {
                     .downcast_ref::<arrow_array::LargeBinaryArray>()
                     .unwrap();
                 Self::process_large_binary_array(sbbf, typed_array)
+            }
+            DataType::BinaryView => {
+                let typed_array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryViewArray>()
+                    .ok_or_else(|| {
+                        Error::invalid_input(
+                            "Expected BinaryViewArray for BinaryView type",
+                            location!(),
+                        )
+                    })?;
+                Self::process_binary_view_array(sbbf, typed_array)
             }
             _ => {
                 return Err(Error::InvalidInput {
@@ -1077,9 +1137,11 @@ impl ScalarIndexPlugin for BloomFilterIndexPlugin {
             // String types
             | DataType::Utf8
             | DataType::LargeUtf8
+            | DataType::Utf8View
             // Binary types
             | DataType::Binary
             | DataType::LargeBinary
+            | DataType::BinaryView
             // Date and time types
             | DataType::Date32
             | DataType::Date64
@@ -1091,7 +1153,7 @@ impl ScalarIndexPlugin for BloomFilterIndexPlugin {
             _ => {
                 return Err(Error::InvalidInput {
                     source: format!(
-                        "Bloom filter index does not support data type: {:?}. Supported types: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64, Utf8, LargeUtf8, Binary, LargeBinary, Date32, Date64, Time32, Time64, Timestamp",
+                        "Bloom filter index does not support data type: {:?}. Supported types: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64, Utf8, LargeUtf8, Utf8View, Binary, LargeBinary, BinaryView, Date32, Date64, Time32, Time64, Timestamp",
                         field.data_type()
                     ).into(),
                     location: location!(),
@@ -2178,5 +2240,153 @@ mod tests {
             }
             _ => panic!("Expected AtMost search result from bloomfilter"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_string_view_bloomfilter_index() {
+        let tmpdir = TempObjDir::default();
+        let test_store = Arc::new(LanceIndexStore::new(
+            Arc::new(ObjectStore::local()),
+            tmpdir.clone(),
+            Arc::new(LanceCache::no_cache()),
+        ));
+
+        // Create string view data
+        let string_values: Vec<String> = (0..200).map(|i| format!("value_{:03}", i)).collect();
+        let string_data = arrow_array::StringViewArray::from_iter_values(string_values.iter());
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            VALUE_COLUMN_NAME,
+            DataType::Utf8View,
+            false,
+        )]));
+        let data = RecordBatch::try_new(schema.clone(), vec![Arc::new(string_data)]).unwrap();
+        let data_stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::once(std::future::ready(Ok(data))),
+        ));
+        let data_stream = add_row_addr(data_stream);
+
+        BloomFilterIndexPlugin::train_bloomfilter_index(
+            data_stream,
+            test_store.as_ref(),
+            Some(BloomFilterIndexBuilderParams::new(100, 0.01)), // ~1% false positive rate
+        )
+        .await
+        .unwrap();
+
+        // Load the index
+        let index = BloomFilterIndex::load(test_store.clone(), None, &LanceCache::no_cache())
+            .await
+            .expect("Failed to load BloomFilterIndex");
+
+        // Should have 2 zones since we have 200 rows and zone size is 100
+        assert_eq!(index.zones.len(), 2);
+
+        // Test search for a value in the first zone
+        let query = BloomFilterQuery::Equals(ScalarValue::Utf8View(Some("value_050".to_string())));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should match the first zone
+        let mut expected = RowAddrTreeMap::new();
+        expected.insert_range(0..100);
+        assert_eq!(result, SearchResult::at_most(expected));
+
+        // Test search for a value in the second zone
+        let query = BloomFilterQuery::Equals(ScalarValue::Utf8View(Some("value_150".to_string())));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should match the second zone
+        let mut expected = RowAddrTreeMap::new();
+        expected.insert_range(100..200);
+        assert_eq!(result, SearchResult::at_most(expected));
+
+        // Test search for a value that doesn't exist
+        let query =
+            BloomFilterQuery::Equals(ScalarValue::Utf8View(Some("nonexistent_value".to_string())));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should return empty since bloom filter correctly filters out this value
+        assert_eq!(result, SearchResult::at_most(RowAddrTreeMap::new()));
+
+        // Test IsIn query with string view values
+        let query = BloomFilterQuery::IsIn(vec![
+            ScalarValue::Utf8View(Some("value_025".to_string())), // First zone
+            ScalarValue::Utf8View(Some("value_175".to_string())), // Second zone
+            ScalarValue::Utf8View(Some("nonexistent".to_string())), // Not present
+        ]);
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should match both zones
+        let mut expected = RowAddrTreeMap::new();
+        expected.insert_range(0..200);
+        assert_eq!(result, SearchResult::at_most(expected));
+    }
+
+    #[tokio::test]
+    async fn test_binary_view_bloomfilter_index() {
+        let tmpdir = TempObjDir::default();
+        let test_store = Arc::new(LanceIndexStore::new(
+            Arc::new(ObjectStore::local()),
+            tmpdir.clone(),
+            Arc::new(LanceCache::no_cache()),
+        ));
+
+        // Create binary view data
+        let binary_values: Vec<Vec<u8>> = (0..100)
+            .map(|i| vec![i as u8, (i + 1) as u8, (i + 2) as u8])
+            .collect();
+        let binary_data = arrow_array::BinaryViewArray::from_iter_values(binary_values.iter());
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            VALUE_COLUMN_NAME,
+            DataType::BinaryView,
+            false,
+        )]));
+        let data = RecordBatch::try_new(schema.clone(), vec![Arc::new(binary_data)]).unwrap();
+        let data_stream: SendableRecordBatchStream = Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream::once(std::future::ready(Ok(data))),
+        ));
+        let data_stream = add_row_addr(data_stream);
+
+        BloomFilterIndexPlugin::train_bloomfilter_index(
+            data_stream,
+            test_store.as_ref(),
+            Some(BloomFilterIndexBuilderParams::new(50, 0.05)),
+        )
+        .await
+        .unwrap();
+
+        // Load the index
+        let index = BloomFilterIndex::load(test_store.clone(), None, &LanceCache::no_cache())
+            .await
+            .expect("Failed to load BloomFilterIndex");
+
+        // Should have 2 zones since we have 100 rows and zone size is 50
+        assert_eq!(index.zones.len(), 2);
+
+        // Test search for a value in the first zone
+        let query = BloomFilterQuery::Equals(ScalarValue::BinaryView(Some(vec![25, 26, 27])));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should match the first zone
+        let mut expected = RowAddrTreeMap::new();
+        expected.insert_range(0..50);
+        assert_eq!(result, SearchResult::at_most(expected));
+
+        // Test search for a value in the second zone
+        let query = BloomFilterQuery::Equals(ScalarValue::BinaryView(Some(vec![75, 76, 77])));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should match the second zone
+        let mut expected = RowAddrTreeMap::new();
+        expected.insert_range(50..100);
+        assert_eq!(result, SearchResult::at_most(expected));
+
+        // Test search for a value that doesn't exist
+        let query = BloomFilterQuery::Equals(ScalarValue::BinaryView(Some(vec![255, 254, 253])));
+        let result = index.search(&query, &NoOpMetricsCollector).await.unwrap();
+
+        // Should return empty since bloom filter correctly filters out this value
+        assert_eq!(result, SearchResult::at_most(RowAddrTreeMap::new()));
     }
 }

@@ -23,7 +23,7 @@ use arrow_array::{
     cast::AsArray,
     new_empty_array, new_null_array,
     types::{ArrowDictionaryKeyType, UInt16Type, UInt32Type, UInt64Type, UInt8Type},
-    Array, ArrayRef, OffsetSizeTrait, UInt64Array,
+    Array, ArrayRef, BinaryViewArray, OffsetSizeTrait, StringViewArray, UInt64Array,
 };
 use arrow_buffer::{ArrowNativeType, BooleanBuffer, BooleanBufferBuilder, NullBuffer};
 use arrow_data::{ArrayData, ArrayDataBuilder};
@@ -583,6 +583,34 @@ impl VariableWidthBlock {
     fn into_arrow(self, data_type: DataType, validate: bool) -> Result<ArrayData> {
         let data_buffer = self.data.into_buffer();
         let offsets_buffer = self.offsets.into_buffer();
+
+        // Handle conversion from i32 to i64 offsets for compatibility.
+        // This is needed when reading legacy data that was stored with 32-bit offsets
+        // but is now being read as LargeUtf8/LargeBinary (which use 64-bit offsets).
+        // Note: For Utf8View/BinaryView types, this conversion is not triggered since
+        // we store them with 64-bit offsets (as seen in arrow_view_to_data_block).
+        let offsets_buffer = if self.bits_per_offset == 32
+            && (data_type == DataType::LargeUtf8 || data_type == DataType::LargeBinary)
+        {
+            // Convert i32 offsets to i64
+            let num_offsets = offsets_buffer.len() / 4;
+            let i32_slice = offsets_buffer.as_slice();
+            let i64_offsets: Vec<i64> = (0..num_offsets)
+                .map(|i| {
+                    let bytes = [
+                        i32_slice[i * 4],
+                        i32_slice[i * 4 + 1],
+                        i32_slice[i * 4 + 2],
+                        i32_slice[i * 4 + 3],
+                    ];
+                    i32::from_le_bytes(bytes) as i64
+                })
+                .collect();
+            arrow_buffer::Buffer::from_vec(i64_offsets)
+        } else {
+            offsets_buffer
+        };
+
         let builder = ArrayDataBuilder::new(data_type)
             .add_buffer(offsets_buffer)
             .add_buffer(data_buffer)
@@ -1224,6 +1252,70 @@ fn arrow_binary_to_data_block(
     })
 }
 
+fn arrow_view_to_data_block(arrays: &[ArrayRef], _num_values: u64) -> DataBlock {
+    // Convert view arrays directly to DataBlock using 64-bit offsets
+    // This avoids the overhead of creating intermediate LargeStringArray/LargeBinaryArray
+    let data_type = arrays[0].data_type();
+
+    // Pre-allocate vectors to avoid repeated reallocations
+    // all_offsets needs num_values + 1 elements (initial offset + one per value)
+    let total_values: usize = arrays.iter().map(|arr| arr.len()).sum();
+    let mut all_offsets = Vec::with_capacity(total_values + 1);
+    let mut all_data = Vec::new();
+    let mut cumulative_offset = 0i64;
+
+    // Start with initial offset of 0
+    all_offsets.push(0);
+
+    match data_type {
+        DataType::BinaryView => {
+            for arr in arrays {
+                let view_arr = arr.as_any().downcast_ref::<BinaryViewArray>().unwrap();
+                for i in 0..view_arr.len() {
+                    if view_arr.is_null(i) {
+                        // For null values, the offset doesn't advance
+                        all_offsets.push(cumulative_offset);
+                    } else {
+                        let val = view_arr.value(i);
+                        cumulative_offset += val.len() as i64;
+                        all_offsets.push(cumulative_offset);
+                        all_data.extend_from_slice(val);
+                    }
+                }
+            }
+        }
+        DataType::Utf8View => {
+            for arr in arrays {
+                let view_arr = arr.as_any().downcast_ref::<StringViewArray>().unwrap();
+                for i in 0..view_arr.len() {
+                    if view_arr.is_null(i) {
+                        // For null values, the offset doesn't advance
+                        all_offsets.push(cumulative_offset);
+                    } else {
+                        let val = view_arr.value(i);
+                        cumulative_offset += val.len() as i64;
+                        all_offsets.push(cumulative_offset);
+                        all_data.extend_from_slice(val.as_bytes());
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    // Use the actual number of values processed (offsets.len() - 1)
+    // instead of the passed num_values parameter to ensure consistency
+    let num_values = (all_offsets.len() - 1) as u64;
+
+    DataBlock::VariableWidth(VariableWidthBlock {
+        data: LanceBuffer::from(arrow_buffer::Buffer::from_vec(all_data)),
+        offsets: LanceBuffer::from(arrow_buffer::Buffer::from_vec(all_offsets)),
+        bits_per_offset: 64,
+        num_values,
+        block_info: BlockInfo::new(),
+    })
+}
+
 fn encode_flat_data(arrays: &[ArrayRef], num_values: u64) -> LanceBuffer {
     let bytes_per_value = arrays[0].data_type().byte_width();
     let mut buffer = Vec::with_capacity(num_values as usize * bytes_per_value);
@@ -1464,7 +1556,7 @@ impl DataBlock {
         let mut encoded = match data_type {
             DataType::Binary | DataType::Utf8 => arrow_binary_to_data_block(arrays, num_values, 32),
             DataType::BinaryView | DataType::Utf8View => {
-                todo!()
+                arrow_view_to_data_block(arrays, num_values)
             }
             DataType::LargeBinary | DataType::LargeUtf8 => {
                 arrow_binary_to_data_block(arrays, num_values, 64)
@@ -1635,8 +1727,8 @@ mod tests {
     use arrow_array::{
         make_array, new_null_array,
         types::{Int32Type, Int8Type},
-        ArrayRef, DictionaryArray, Int8Array, LargeBinaryArray, StringArray, UInt16Array,
-        UInt8Array,
+        ArrayRef, BinaryViewArray, DictionaryArray, Int8Array, LargeBinaryArray, StringArray,
+        StringViewArray, UInt16Array, UInt8Array,
     };
     use arrow_buffer::{BooleanBuffer, NullBuffer};
 
@@ -1646,7 +1738,7 @@ mod tests {
 
     use crate::buffer::LanceBuffer;
 
-    use super::{AllNullDataBlock, DataBlock};
+    use super::{arrow_view_to_data_block, AllNullDataBlock, DataBlock};
 
     use arrow_array::Array;
 
@@ -2008,5 +2100,261 @@ mod tests {
 
         let total_nulls_size_in_bytes = concatenated_array.nulls().unwrap().len().div_ceil(8);
         assert!(block.data_size() == (total_buffer_size + total_nulls_size_in_bytes) as u64);
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_basic() {
+        // Test basic string view conversion
+        let values = vec!["hello", "world", "test", "data"];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 4);
+
+        assert_eq!(block.num_values(), 4);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.data,
+            LanceBuffer::copy_slice(b"helloworldtestdata")
+        );
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 5, 10, 14, 18])
+        );
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_with_nulls() {
+        // Test string view conversion with nulls
+        let values: Vec<Option<&str>> = vec![Some("hello"), None, Some("world"), None, Some("")];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 5);
+
+        assert_eq!(block.num_values(), 5);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        // Null values should have same offset as previous
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 5, 5, 10, 10, 10])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"helloworld"));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_empty_strings() {
+        // Test string view conversion with empty strings
+        let values: Vec<Option<&str>> = vec![Some(""), Some(""), Some(""), Some("test")];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 4);
+
+        assert_eq!(block.num_values(), 4);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 0, 0, 0, 4])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"test"));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_multiple_arrays() {
+        // Test concatenating multiple string view arrays
+        let values1 = vec!["hello", "world"];
+        let values2 = vec!["foo", "bar"];
+        let array1 = StringViewArray::from(values1);
+        let array2 = StringViewArray::from(values2);
+        let arr_refs: Vec<ArrayRef> = vec![Arc::new(array1), Arc::new(array2)];
+
+        let block = arrow_view_to_data_block(&arr_refs, 4);
+
+        assert_eq!(block.num_values(), 4);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 5, 10, 13, 16])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"helloworldfoobar"));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_large_strings() {
+        // Test with large strings
+        let large_str = "a".repeat(1000);
+        let values = vec![large_str.as_str(), "small", "medium"];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
+
+        assert_eq!(block.num_values(), 3);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(var_width.data.len(), 1000 + 5 + 6);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 1000, 1005, 1011])
+        );
+    }
+
+    #[test]
+    fn test_binary_view_to_data_block_basic() {
+        // Test basic binary view conversion
+        let values = vec![b"hello".as_slice(), b"world".as_slice(), b"test".as_slice()];
+        let array = BinaryViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
+
+        assert_eq!(block.num_values(), 3);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"helloworldtest"));
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 5, 10, 14])
+        );
+    }
+
+    #[test]
+    fn test_binary_view_to_data_block_with_nulls() {
+        // Test binary view conversion with nulls
+        let values: Vec<Option<&[u8]>> = vec![
+            Some(b"hello"),
+            None,
+            Some(b"world"),
+            None,
+            Some(b""),
+            Some(b"data"),
+        ];
+        let array = BinaryViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 6);
+
+        assert_eq!(block.num_values(), 6);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        // Check that null values don't advance the offset
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 5, 5, 10, 10, 10, 14])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"helloworlddata"));
+    }
+
+    #[test]
+    fn test_binary_view_to_data_block_empty_binary() {
+        // Test binary view with empty binary values
+        let values: Vec<Option<&[u8]>> = vec![Some(b""), Some(b""), Some(b"test")];
+        let array = BinaryViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
+
+        assert_eq!(block.num_values(), 3);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 0, 0, 4])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"test"));
+    }
+
+    #[test]
+    fn test_binary_view_to_data_block_multiple_arrays() {
+        // Test concatenating multiple binary view arrays
+        let values1 = vec![b"a".as_slice(), b"b".as_slice()];
+        let values2 = vec![b"c".as_slice(), b"d".as_slice()];
+        let array1 = BinaryViewArray::from(values1);
+        let array2 = BinaryViewArray::from(values2);
+        let arr_refs: Vec<ArrayRef> = vec![Arc::new(array1), Arc::new(array2)];
+
+        let block = arrow_view_to_data_block(&arr_refs, 4);
+
+        assert_eq!(block.num_values(), 4);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 1, 2, 3, 4])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"abcd"));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_all_nulls() {
+        // Test with all null values
+        let values: Vec<Option<&str>> = vec![None, None, None];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
+
+        assert_eq!(block.num_values(), 3);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        // All offsets should be 0
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 0, 0, 0])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b""));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_single_value() {
+        // Test with single value
+        let values = vec!["single"];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 1);
+
+        assert_eq!(block.num_values(), 1);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(vec![0i64, 6])
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"single"));
+    }
+
+    #[test]
+    fn test_string_view_to_data_block_mixed_nulls_and_empty() {
+        // Test complex case with mix of nulls, empty strings, and normal strings
+        let values: Vec<Option<&str>> = vec![
+            Some("start"),
+            None,
+            Some(""),
+            Some("middle"),
+            Some(""),
+            None,
+            Some("end"),
+            Some(""),
+        ];
+        let array = StringViewArray::from(values);
+        let arr_ref = Arc::new(array) as ArrayRef;
+
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 8);
+
+        assert_eq!(block.num_values(), 8);
+        let var_width = block.as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+        let expected_offsets = vec![0i64, 5, 5, 5, 11, 11, 11, 14, 14];
+        assert_eq!(
+            var_width.offsets,
+            LanceBuffer::reinterpret_vec(expected_offsets)
+        );
+        assert_eq!(var_width.data, LanceBuffer::copy_slice(b"startmiddleend"));
     }
 }

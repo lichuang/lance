@@ -3,7 +3,7 @@
 
 use std::{fmt::Debug, ops::Range, sync::Arc, vec};
 
-use arrow_array::{cast::AsArray, make_array, Array, ArrayRef};
+use arrow_array::{cast::AsArray, make_array, Array, ArrayRef, BinaryViewArray, StringViewArray};
 use arrow_buffer::bit_util;
 use arrow_schema::DataType;
 use futures::{future::BoxFuture, FutureExt};
@@ -295,7 +295,28 @@ impl DecodeArrayTask for PrimitiveFieldDecodeTask {
             .physical_decoder
             .decode(self.rows_to_skip, self.rows_to_take)?;
 
-        let array = make_array(block.into_arrow(self.data_type.clone(), self.should_validate)?);
+        // View types (Utf8View, BinaryView) are stored as their non-view counterparts.
+        // We need to decode as the non-view type and then convert back to the view type.
+        let decode_type = match self.data_type {
+            DataType::Utf8View => DataType::LargeUtf8,
+            DataType::BinaryView => DataType::LargeBinary,
+            _ => self.data_type.clone(),
+        };
+
+        let array = make_array(block.into_arrow(decode_type, self.should_validate)?);
+
+        // Convert from non-view array to view array if needed
+        let array: ArrayRef = match self.data_type {
+            DataType::Utf8View => {
+                let string_arr = array.as_string::<i64>();
+                Arc::new(StringViewArray::from(string_arr)) as ArrayRef
+            }
+            DataType::BinaryView => {
+                let binary_arr = array.as_binary::<i64>();
+                Arc::new(BinaryViewArray::from(binary_arr)) as ArrayRef
+            }
+            _ => array,
+        };
 
         // This is a bit of a hack to work around https://github.com/apache/arrow-rs/issues/6302
         //
@@ -529,5 +550,262 @@ impl FieldEncoder for PrimitiveFieldEncoder {
         _external_buffers: &mut OutOfLineBuffers,
     ) -> BoxFuture<'_, Result<Vec<crate::encoder::EncodedColumn>>> {
         std::future::ready(Ok(vec![EncodedColumn::default()])).boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow_array::{
+        Array, ArrayRef, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringViewArray,
+    };
+    use arrow_schema::DataType;
+
+    /// Test that view types are correctly encoded and decoded
+    /// This test simulates full encode-decode cycle for view types
+    #[tokio::test]
+    async fn test_utf8view_encode_decode_cycle() {
+        use crate::data::DataBlock;
+
+        // Create test data with Utf8View type
+        let values = vec!["hello", "world", "test", "", "view"];
+        let utf8_view_array = StringViewArray::from(values);
+
+        // Test encoding to DataBlock
+        let arrays: Vec<ArrayRef> = vec![Arc::new(utf8_view_array)];
+        let num_values = arrays[0].len() as u64;
+        let block = DataBlock::from_arrays(&arrays, num_values);
+
+        // Verify of block was created successfully
+        assert_eq!(block.num_values(), 5);
+
+        // Test decoding back to LargeUtf8 (storage format)
+        let var_width = block.clone().as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+
+        // Decode to LargeUtf8
+        let decoded_type = DataType::LargeUtf8;
+        let array_data = block.into_arrow(decoded_type, true).unwrap();
+        let large_utf8 = LargeStringArray::from(array_data);
+
+        // Verify of decoded values
+        assert_eq!(large_utf8.len(), 5);
+        assert_eq!(large_utf8.value(0), "hello");
+        assert_eq!(large_utf8.value(1), "world");
+        assert_eq!(large_utf8.value(2), "test");
+        assert_eq!(large_utf8.value(3), "");
+        assert_eq!(large_utf8.value(4), "view");
+
+        // Convert back to Utf8View (what that decoder does)
+        let converted_back: StringViewArray = large_utf8.iter().collect();
+        assert_eq!(converted_back.len(), 5);
+        assert_eq!(converted_back.value(0), "hello");
+        assert_eq!(converted_back.value(1), "world");
+        assert_eq!(converted_back.value(2), "test");
+        assert_eq!(converted_back.value(3), "");
+        assert_eq!(converted_back.value(4), "view");
+    }
+
+    #[tokio::test]
+    async fn test_binaryview_encode_decode_cycle() {
+        use crate::data::DataBlock;
+
+        // Create test data with BinaryView type
+        let values = vec![
+            b"hello".as_slice(),
+            b"world".as_slice(),
+            b"test".as_slice(),
+            b"".as_slice(),
+            b"view".as_slice(),
+        ];
+        let binary_view_array = BinaryViewArray::from(values);
+
+        // Test encoding to DataBlock
+        let arrays: Vec<ArrayRef> = vec![Arc::new(binary_view_array)];
+        let num_values = arrays[0].len() as u64;
+        let block = DataBlock::from_arrays(&arrays, num_values);
+
+        // Verify of block was created successfully
+        assert_eq!(block.num_values(), 5);
+
+        // Test decoding back to LargeBinary (storage format)
+        let var_width = block.clone().as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+
+        // Decode to LargeBinary
+        let decoded_type = DataType::LargeBinary;
+        let array_data = block.into_arrow(decoded_type, true).unwrap();
+        let large_binary = LargeBinaryArray::from(array_data);
+
+        // Verify of decoded values
+        assert_eq!(large_binary.len(), 5);
+        assert_eq!(large_binary.value(0), b"hello");
+        assert_eq!(large_binary.value(1), b"world");
+        assert_eq!(large_binary.value(2), b"test");
+        assert_eq!(large_binary.value(3), b"");
+        assert_eq!(large_binary.value(4), b"view");
+
+        // Convert back to BinaryView (what that decoder does)
+        let converted_back: BinaryViewArray = large_binary.iter().collect();
+        assert_eq!(converted_back.len(), 5);
+        assert_eq!(converted_back.value(0), b"hello");
+        assert_eq!(converted_back.value(1), b"world");
+        assert_eq!(converted_back.value(2), b"test");
+        assert_eq!(converted_back.value(3), b"");
+        assert_eq!(converted_back.value(4), b"view");
+    }
+
+    #[tokio::test]
+    async fn test_utf8view_with_nulls_encode_decode() {
+        use crate::data::DataBlock;
+
+        // Create test data with Utf8View type including nulls
+        let values: Vec<Option<&str>> = vec![
+            Some("hello"),
+            None,
+            Some("world"),
+            None,
+            Some(""),
+            Some("test"),
+        ];
+        let utf8_view_array = StringViewArray::from(values);
+
+        // Test encoding to DataBlock
+        let arrays: Vec<ArrayRef> = vec![Arc::new(utf8_view_array)];
+        let num_values = arrays[0].len() as u64;
+        let block = DataBlock::from_arrays(&arrays, num_values);
+
+        // Verify of block was created successfully
+        assert_eq!(block.num_values(), 6);
+
+        // Decode to LargeUtf8
+        let decoded_type = DataType::LargeUtf8;
+        // When the data has nulls, the block is wrapped in a NullableDataBlock
+        let array_data = block.into_arrow(decoded_type, true).unwrap();
+        let large_utf8 = LargeStringArray::from(array_data);
+
+        // Verify of decoded values including nulls
+        assert_eq!(large_utf8.len(), 6);
+        assert_eq!(large_utf8.null_count(), 2);
+        assert!(!large_utf8.is_null(0));
+        assert!(large_utf8.is_null(1));
+        assert!(!large_utf8.is_null(2));
+        assert!(large_utf8.is_null(3));
+        assert!(!large_utf8.is_null(4));
+        assert!(!large_utf8.is_null(5));
+
+        assert_eq!(large_utf8.value(0), "hello");
+        assert_eq!(large_utf8.value(2), "world");
+        assert_eq!(large_utf8.value(4), "");
+        assert_eq!(large_utf8.value(5), "test");
+
+        // Convert back to Utf8View
+        let converted_back: StringViewArray = large_utf8.iter().collect();
+        assert_eq!(converted_back.null_count(), 2);
+        assert!(!converted_back.is_null(0));
+        assert!(converted_back.is_null(1));
+        assert!(!converted_back.is_null(2));
+        assert!(converted_back.is_null(3));
+        assert!(!converted_back.is_null(4));
+        assert!(!converted_back.is_null(5));
+    }
+
+    #[tokio::test]
+    async fn test_utf8view_large_string_encode_decode() {
+        use crate::data::DataBlock;
+
+        // Create test data with large strings (testing view handling of long strings)
+        let large_str = "a".repeat(1000);
+        let x_repeated = "x".repeat(500);
+        let values = vec![
+            large_str.as_str(),
+            "medium",
+            "small",
+            "",
+            x_repeated.as_str(),
+        ];
+        let utf8_view_array = StringViewArray::from(values);
+
+        // Test encoding to DataBlock
+        let arrays: Vec<ArrayRef> = vec![Arc::new(utf8_view_array)];
+        let num_values = arrays[0].len() as u64;
+        let block = DataBlock::from_arrays(&arrays, num_values);
+
+        // Verify of block was created successfully
+        assert_eq!(block.num_values(), 5);
+
+        // Decode to LargeUtf8
+        let decoded_type = DataType::LargeUtf8;
+        let var_width = block.clone().as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+
+        let array_data = block.into_arrow(decoded_type, true).unwrap();
+        let large_utf8 = LargeStringArray::from(array_data);
+
+        // Verify of decoded values
+        assert_eq!(large_utf8.len(), 5);
+        assert_eq!(large_utf8.value(0).len(), 1000);
+        assert_eq!(large_utf8.value(1), "medium");
+        assert_eq!(large_utf8.value(2), "small");
+        assert_eq!(large_utf8.value(3), "");
+        assert_eq!(large_utf8.value(4).len(), 500);
+
+        // Convert back to Utf8View
+        let converted_back: StringViewArray = large_utf8.iter().collect();
+        assert_eq!(converted_back.len(), 5);
+        assert_eq!(converted_back.value(0).len(), 1000);
+        assert_eq!(converted_back.value(1), "medium");
+        assert_eq!(converted_back.value(2), "small");
+        assert_eq!(converted_back.value(3), "");
+        assert_eq!(converted_back.value(4).len(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_arrays_utf8view_encode_decode() {
+        use crate::data::DataBlock;
+
+        // Create multiple StringView arrays to test concatenation
+        let values1 = vec!["hello", "world"];
+        let values2 = vec!["foo", "bar"];
+        let values3 = vec!["test", "data"];
+
+        let array1 = StringViewArray::from(values1);
+        let array2 = StringViewArray::from(values2);
+        let array3 = StringViewArray::from(values3);
+
+        let arrays: Vec<ArrayRef> = vec![Arc::new(array1), Arc::new(array2), Arc::new(array3)];
+        let num_values = arrays.iter().map(|a| a.len()).sum::<usize>() as u64;
+        let block = DataBlock::from_arrays(&arrays, num_values);
+
+        // Verify of block was created successfully
+        assert_eq!(block.num_values(), 6);
+
+        // Decode to LargeUtf8
+        let decoded_type = DataType::LargeUtf8;
+        let var_width = block.clone().as_variable_width().unwrap();
+        assert_eq!(var_width.bits_per_offset, 64);
+
+        let array_data = block.into_arrow(decoded_type, true).unwrap();
+        let large_utf8 = LargeStringArray::from(array_data);
+
+        // Verify all values were concatenated correctly
+        assert_eq!(large_utf8.len(), 6);
+        assert_eq!(large_utf8.value(0), "hello");
+        assert_eq!(large_utf8.value(1), "world");
+        assert_eq!(large_utf8.value(2), "foo");
+        assert_eq!(large_utf8.value(3), "bar");
+        assert_eq!(large_utf8.value(4), "test");
+        assert_eq!(large_utf8.value(5), "data");
+
+        // Convert back to Utf8View
+        let converted_back: StringViewArray = large_utf8.iter().collect();
+        assert_eq!(converted_back.len(), 6);
+        assert_eq!(converted_back.value(0), "hello");
+        assert_eq!(converted_back.value(1), "world");
+        assert_eq!(converted_back.value(2), "foo");
+        assert_eq!(converted_back.value(3), "bar");
+        assert_eq!(converted_back.value(4), "test");
+        assert_eq!(converted_back.value(5), "data");
     }
 }
