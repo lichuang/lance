@@ -691,7 +691,17 @@ impl Field {
                 if (dt.is_primitive() && other_dt.is_primitive())
                     || (dt.is_binary_like() && other_dt.is_binary_like()) =>
             {
-                if dt != other_dt {
+                // View types (Utf8View, BinaryView) are stored as their non-view counterparts.
+                // Treat Utf8View as compatible with Utf8, and BinaryView as compatible with Binary.
+                let types_match = match (&dt, &other_dt) {
+                    (DataType::Utf8View, DataType::Utf8) | (DataType::Utf8, DataType::Utf8View) => {
+                        true
+                    }
+                    (DataType::BinaryView, DataType::Binary)
+                    | (DataType::Binary, DataType::BinaryView) => true,
+                    _ => dt == other_dt,
+                };
+                if !types_match {
                     return Err(Error::Schema {
                         message: format!(
                             "Attempt to project field by different types: {} and {}",

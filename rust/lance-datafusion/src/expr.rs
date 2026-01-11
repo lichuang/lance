@@ -218,11 +218,13 @@ pub fn safe_coerce_scalar(value: &ScalarValue, ty: &DataType) -> Option<ScalarVa
         ScalarValue::Utf8(val) => match ty {
             DataType::Utf8 => Some(value.clone()),
             DataType::LargeUtf8 => Some(ScalarValue::LargeUtf8(val.clone())),
+            DataType::Utf8View => Some(ScalarValue::Utf8View(val.clone())),
             _ => None,
         },
         ScalarValue::LargeUtf8(val) => match ty {
             DataType::Utf8 => Some(ScalarValue::Utf8(val.clone())),
             DataType::LargeUtf8 => Some(value.clone()),
+            DataType::Utf8View => Some(ScalarValue::Utf8View(val.clone())),
             _ => None,
         },
         ScalarValue::Boolean(_) => match ty {
@@ -408,6 +410,7 @@ pub fn safe_coerce_scalar(value: &ScalarValue, ty: &DataType) -> Option<ScalarVa
         ScalarValue::Binary(value) => match ty {
             DataType::Binary => Some(ScalarValue::Binary(value.clone())),
             DataType::LargeBinary => Some(ScalarValue::LargeBinary(value.clone())),
+            DataType::BinaryView => Some(ScalarValue::BinaryView(value.clone())),
             DataType::FixedSizeBinary(len) => {
                 if let Some(value) = value {
                     if value.len() == *len as usize {

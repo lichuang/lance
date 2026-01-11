@@ -563,6 +563,7 @@ impl CoreFieldDecoderStrategy {
                 // DataType::is_primitive doesn't consider these primitive but we do
                 DataType::Boolean | DataType::Null | DataType::FixedSizeBinary(_) => true,
                 DataType::FixedSizeList(inner, _) => Self::is_primitive_legacy(inner.data_type()),
+                DataType::Utf8View | DataType::BinaryView => true,
                 _ => false,
             }
         }

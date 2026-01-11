@@ -757,6 +757,18 @@ impl BloomFilterProcessor {
         has_null
     }
 
+    fn process_string_view_array(sbbf: &mut Sbbf, array: &arrow_array::StringViewArray) -> bool {
+        let mut has_null = false;
+        for i in 0..array.len() {
+            if array.is_valid(i) {
+                sbbf.insert(array.value(i));
+            } else {
+                has_null = true;
+            }
+        }
+        has_null
+    }
+
     fn process_binary_array(sbbf: &mut Sbbf, array: &arrow_array::BinaryArray) -> bool {
         let mut has_null = false;
         for i in 0..array.len() {
@@ -770,6 +782,18 @@ impl BloomFilterProcessor {
     }
 
     fn process_large_binary_array(sbbf: &mut Sbbf, array: &arrow_array::LargeBinaryArray) -> bool {
+        let mut has_null = false;
+        for i in 0..array.len() {
+            if array.is_valid(i) {
+                sbbf.insert(array.value(i));
+            } else {
+                has_null = true;
+            }
+        }
+        has_null
+    }
+
+    fn process_binary_view_array(sbbf: &mut Sbbf, array: &arrow_array::BinaryViewArray) -> bool {
         let mut has_null = false;
         for i in 0..array.len() {
             if array.is_valid(i) {
@@ -971,6 +995,18 @@ impl ZoneProcessor for BloomFilterProcessor {
                     .unwrap();
                 Self::process_large_string_array(sbbf, typed_array)
             }
+            DataType::Utf8View => {
+                let typed_array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::StringViewArray>()
+                    .ok_or_else(|| {
+                        Error::invalid_input(
+                            "Expected StringViewArray for Utf8View type",
+                            location!(),
+                        )
+                    })?;
+                Self::process_string_view_array(sbbf, typed_array)
+            }
             DataType::Binary => {
                 let typed_array = array
                     .as_any()
@@ -984,6 +1020,18 @@ impl ZoneProcessor for BloomFilterProcessor {
                     .downcast_ref::<arrow_array::LargeBinaryArray>()
                     .unwrap();
                 Self::process_large_binary_array(sbbf, typed_array)
+            }
+            DataType::BinaryView => {
+                let typed_array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::BinaryViewArray>()
+                    .ok_or_else(|| {
+                        Error::invalid_input(
+                            "Expected BinaryViewArray for BinaryView type",
+                            location!(),
+                        )
+                    })?;
+                Self::process_binary_view_array(sbbf, typed_array)
             }
             _ => {
                 return Err(Error::InvalidInput {
@@ -1077,9 +1125,11 @@ impl ScalarIndexPlugin for BloomFilterIndexPlugin {
             // String types
             | DataType::Utf8
             | DataType::LargeUtf8
+            | DataType::Utf8View
             // Binary types
             | DataType::Binary
             | DataType::LargeBinary
+            | DataType::BinaryView
             // Date and time types
             | DataType::Date32
             | DataType::Date64
@@ -1091,7 +1141,7 @@ impl ScalarIndexPlugin for BloomFilterIndexPlugin {
             _ => {
                 return Err(Error::InvalidInput {
                     source: format!(
-                        "Bloom filter index does not support data type: {:?}. Supported types: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64, Utf8, LargeUtf8, Binary, LargeBinary, Date32, Date64, Time32, Time64, Timestamp",
+                        "Bloom filter index does not support data type: {:?}. Supported types: Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64, Utf8, LargeUtf8, Utf8View, Binary, LargeBinary, BinaryView, Date32, Date64, Time32, Time64, Timestamp",
                         field.data_type()
                     ).into(),
                     location: location!(),

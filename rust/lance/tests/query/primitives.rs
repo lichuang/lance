@@ -253,7 +253,7 @@ async fn test_query_timestamp(#[case] data_type: DataType) {
 #[rstest::rstest]
 #[case::utf8(DataType::Utf8)]
 #[case::large_utf8(DataType::LargeUtf8)]
-// #[case::string_view(DataType::Utf8View)] // TODO: https://github.com/lancedb/lance/issues/5172
+#[case::utf8_view(DataType::Utf8View)]
 async fn test_query_string(#[case] data_type: DataType) {
     // Create arrays that include empty strings
     let string_values = vec![
@@ -310,7 +310,7 @@ async fn test_query_string(#[case] data_type: DataType) {
 #[rstest::rstest]
 #[case::binary(DataType::Binary)]
 #[case::large_binary(DataType::LargeBinary)]
-// #[case::binary_view(DataType::BinaryView)] // TODO: https://github.com/lancedb/lance/issues/5172
+#[case::binary_view(DataType::BinaryView)]
 async fn test_query_binary(#[case] data_type: DataType) {
     // Create arrays that include empty binary
     let binary_values = vec![

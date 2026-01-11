@@ -152,8 +152,10 @@ impl CoreFieldEncodingStrategy {
                 | DataType::FixedSizeList(_, _)
                 | DataType::Binary
                 | DataType::LargeBinary
+                | DataType::BinaryView
                 | DataType::Utf8
-                | DataType::LargeUtf8,
+                | DataType::LargeUtf8
+                | DataType::Utf8View,
         )
     }
 }
@@ -273,11 +275,13 @@ pub struct CoreArrayEncodingStrategy {
     pub version: LanceFileVersion,
 }
 
-const BINARY_DATATYPES: [DataType; 4] = [
+const BINARY_DATATYPES: [DataType; 6] = [
     DataType::Binary,
     DataType::LargeBinary,
+    DataType::BinaryView,
     DataType::Utf8,
     DataType::LargeUtf8,
+    DataType::Utf8View,
 ];
 
 impl CoreArrayEncodingStrategy {
@@ -374,13 +378,18 @@ impl CoreArrayEncodingStrategy {
                     value_encoder,
                 )))
             }
-            DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary => {
+            DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Binary
+            | DataType::LargeBinary
+            | DataType::BinaryView => {
                 if use_dict_encoding {
                     let dict_indices_encoder = Self::choose_array_encoder(
                         // We need to pass arrays to this method to figure out what kind of compression to
-                        // use but we haven't actually calculated the indices yet.  For now, we just assume
+                        // use but we haven't actually calculated indices yet.  For now, we just assume
                         // worst case and use the full range.  In the future maybe we can pass in statistics
-                        // instead of the actual data
+                        // instead of actual data
                         &[Arc::new(UInt8Array::from_iter_values(0_u8..255_u8))],
                         &DataType::UInt8,
                         data_size,
