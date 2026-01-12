@@ -441,8 +441,6 @@ class LanceDataset(pa.dataset.Dataset):
 
         # Handle deprecation warning for index_cache_size
         if index_cache_size is not None:
-            import warnings
-
             warnings.warn(
                 "The 'index_cache_size' parameter is deprecated. "
                 "Use 'index_cache_size_bytes' instead. "
@@ -2340,6 +2338,7 @@ class LanceDataset(pa.dataset.Dataset):
             Literal["BITMAP"],
             Literal["LABEL_LIST"],
             Literal["INVERTED"],
+            Literal["FTS"],
             Literal["NGRAM"],
             Literal["ZONEMAP"],
             Literal["BLOOMFILTER"],
@@ -2409,8 +2408,9 @@ class LanceDataset(pa.dataset.Dataset):
           called zones and stores summary statistics for each zone (min, max,
           null_count, nan_count, fragment_id, local_row_offset). It's very small but
           only effective if the column is at least approximately in sorted order.
-        * ``INVERTED``. It is used to index document columns. This index
-          can conduct full-text searches. For example, a column that contains any word
+        * ``INVERTED`` (alias: ``FTS``). It is used to index document columns. This
+          index can conduct full-text searches. For example, a column that contains any
+          word
           of query string "hello world". The results will be ranked by BM25.
         * ``BLOOMFILTER``. This inexact index uses a bloom filter.  It is small
              but can only handle filters with equals and not equals and may require
@@ -2430,7 +2430,7 @@ class LanceDataset(pa.dataset.Dataset):
         index_type : str
             The type of the index.  One of ``"BTREE"``, ``"BITMAP"``,
             ``"LABEL_LIST"``, ``"NGRAM"``, ``"ZONEMAP"``, ``"INVERTED"``,
-            ``"BLOOMFILTER"``, ``"RTREE"``.
+            ``"FTS"``, ``"BLOOMFILTER"``, ``"RTREE"``.
         name : str, optional
             The index name. If not provided, it will be generated from the
             column name.
@@ -2550,6 +2550,7 @@ class LanceDataset(pa.dataset.Dataset):
                 "ZONEMAP",
                 "LABEL_LIST",
                 "INVERTED",
+                "FTS",
                 "BLOOMFILTER",
                 "RTREE",
             ]:
@@ -2589,7 +2590,7 @@ class LanceDataset(pa.dataset.Dataset):
                     field_type
                 ):
                     raise TypeError(f"NGRAM index column {column} must be a string")
-            elif index_type in ["INVERTED"]:
+            elif index_type in ["INVERTED", "FTS"]:
                 value_type = field_type
                 if pa.types.is_list(field_type) or pa.types.is_large_list(field_type):
                     value_type = field_type.value_type
@@ -4552,7 +4553,10 @@ class ScannerBuilder:
             setter = getattr(self, key, None)
             if setter is None:
                 raise ValueError(f"Unknown option {key}")
-            setter(value)
+            if isinstance(value, dict):
+                setter(**value)
+            else:
+                setter(value)
         return self
 
     def batch_size(self, batch_size: int) -> ScannerBuilder:
@@ -5665,8 +5669,6 @@ def write_dataset(
                     response = namespace.declare_table(declare_request)
                 except (UnsupportedOperationError, NotImplementedError):
                     # Fall back to deprecated create_empty_table
-                    import warnings
-
                     warnings.warn(
                         "create_empty_table is deprecated, use declare_table instead. "
                         "Support will be removed in 3.0.0.",
@@ -5679,8 +5681,6 @@ def write_dataset(
                     response = namespace.create_empty_table(fallback_request)
             else:
                 # Namespace doesn't have declare_table, fall back to create_empty_table
-                import warnings
-
                 warnings.warn(
                     "create_empty_table is deprecated, use declare_table instead. "
                     "Support will be removed in 3.0.0.",

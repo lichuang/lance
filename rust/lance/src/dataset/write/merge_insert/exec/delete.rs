@@ -296,6 +296,7 @@ impl ExecutionPlan for DeleteOnlyMergeInsertExec {
                 bytes_written: 0,
                 num_files_written: 0,
                 num_attempts: 1,
+                num_skipped_duplicates: 0,
             };
 
             if let Ok(mut transaction_guard) = transaction_holder.lock() {

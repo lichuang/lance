@@ -4989,3 +4989,38 @@ def test_branches(tmp_path: Path):
     branch1.checkout_latest()
     assert branch1.version == 2
     assert branch1.to_table().combine_chunks() == expected_branch1.combine_chunks()
+
+
+def test_default_scan_options_nearest(tmp_path: Path) -> None:
+    dim = 4
+    num_rows = 10
+
+    values = []
+    for i in range(num_rows):
+        values.extend(float(i) for _ in range(dim))
+    value_array = pa.array(values, type=pa.float32())
+    vector_array = pa.FixedSizeListArray.from_arrays(value_array, dim)
+    table = pa.Table.from_pydict({"vector": vector_array, "id": list(range(num_rows))})
+
+    base_dir = tmp_path / "nearest_default_scan_options"
+    lance.write_dataset(table, base_dir)
+
+    query_vec = [0.0] * dim
+    default_scan_options = {
+        "nearest": {
+            "column": "vector",
+            "q": query_vec,
+            "k": 5,
+        },
+    }
+
+    ds = lance.dataset(base_dir, default_scan_options=default_scan_options)
+    result = ds.to_table()
+
+    assert result.num_rows == 5
+
+    assert "_distance" in result.column_names
+    distances = result["_distance"].to_pylist()
+    assert distances == sorted(distances)
+
+    assert "id" in result.column_names
