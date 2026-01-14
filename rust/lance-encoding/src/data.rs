@@ -2102,7 +2102,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 4);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 4);
 
         assert_eq!(block.num_values(), 4);
         let var_width = block.as_variable_width().unwrap();
@@ -2124,7 +2124,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 5);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 5);
 
         assert_eq!(block.num_values(), 5);
         let var_width = block.as_variable_width().unwrap();
@@ -2144,7 +2144,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 4);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 4);
 
         assert_eq!(block.num_values(), 4);
         let var_width = block.as_variable_width().unwrap();
@@ -2185,7 +2185,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 3);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
 
         assert_eq!(block.num_values(), 3);
         let var_width = block.as_variable_width().unwrap();
@@ -2204,7 +2204,7 @@ mod tests {
         let array = BinaryViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 3);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
 
         assert_eq!(block.num_values(), 3);
         let var_width = block.as_variable_width().unwrap();
@@ -2230,7 +2230,7 @@ mod tests {
         let array = BinaryViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 6);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 6);
 
         assert_eq!(block.num_values(), 6);
         let var_width = block.as_variable_width().unwrap();
@@ -2250,7 +2250,7 @@ mod tests {
         let array = BinaryViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 3);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
 
         assert_eq!(block.num_values(), 3);
         let var_width = block.as_variable_width().unwrap();
@@ -2290,7 +2290,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 3);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 3);
 
         assert_eq!(block.num_values(), 3);
         let var_width = block.as_variable_width().unwrap();
@@ -2310,7 +2310,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 1);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 1);
 
         assert_eq!(block.num_values(), 1);
         let var_width = block.as_variable_width().unwrap();
@@ -2338,7 +2338,7 @@ mod tests {
         let array = StringViewArray::from(values);
         let arr_ref = Arc::new(array) as ArrayRef;
 
-        let block = arrow_view_to_data_block(&[arr_ref.clone()], 8);
+        let block = arrow_view_to_data_block(std::slice::from_ref(&arr_ref), 8);
 
         assert_eq!(block.num_values(), 8);
         let var_width = block.as_variable_width().unwrap();

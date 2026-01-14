@@ -573,7 +573,7 @@ mod tests {
         let utf8_view_array = StringViewArray::from(values);
 
         // Test encoding to DataBlock
-        let arrays: Vec<ArrayRef> = vec![Arc::new(utf8_view_array.clone())];
+        let arrays: Vec<ArrayRef> = vec![Arc::new(utf8_view_array)];
         let num_values = arrays[0].len() as u64;
         let block = DataBlock::from_arrays(&arrays, num_values);
 
@@ -622,7 +622,7 @@ mod tests {
         let binary_view_array = BinaryViewArray::from(values);
 
         // Test encoding to DataBlock
-        let arrays: Vec<ArrayRef> = vec![Arc::new(binary_view_array.clone())];
+        let arrays: Vec<ArrayRef> = vec![Arc::new(binary_view_array)];
         let num_values = arrays[0].len() as u64;
         let block = DataBlock::from_arrays(&arrays, num_values);
 
