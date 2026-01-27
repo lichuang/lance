@@ -1261,7 +1261,19 @@ fn arrow_view_to_data_block(arrays: &[ArrayRef], _num_values: u64) -> DataBlock 
     // all_offsets needs num_values + 1 elements (initial offset + one per value)
     let total_values: usize = arrays.iter().map(|arr| arr.len()).sum();
     let mut all_offsets = Vec::with_capacity(total_values + 1);
-    let mut all_data = Vec::new();
+    // Pre-allocate data buffer with estimated capacity (sum of non-null values)
+    let estimated_data_size: usize = arrays
+        .iter()
+        .map(|arr| {
+            // Get the total buffer size for this array as an estimate
+            arr.to_data()
+                .buffers()
+                .iter()
+                .map(|b| b.len())
+                .sum::<usize>()
+        })
+        .sum();
+    let mut all_data = Vec::with_capacity(estimated_data_size);
     let mut cumulative_offset = 0i64;
 
     // Start with initial offset of 0
