@@ -475,6 +475,16 @@ pub fn iter_str_array(arr: &dyn Array) -> Box<dyn Iterator<Item = Option<&str>> 
     }
 }
 
+pub fn iter_binary_array(arr: &dyn Array) -> Box<dyn Iterator<Item = Option<&[u8]>> + Send + '_> {
+    match arr.data_type() {
+        DataType::Binary => Box::new(arr.as_binary::<i32>().iter()),
+        DataType::LargeBinary => Box::new(arr.as_binary::<i64>().iter()),
+        DataType::BinaryView => Box::new(arr.as_binary_view().iter()),
+        DataType::FixedSizeBinary(_) => Box::new(arr.as_fixed_size_binary().iter()),
+        _ => panic!("Expecting a binary type, found {:?}", arr.data_type()),
+    }
+}
+
 /// Extends Arrow's [RecordBatch].
 pub trait RecordBatchExt {
     /// Append a new column to this [`RecordBatch`] and returns a new RecordBatch.
