@@ -316,6 +316,21 @@ message Manifest {
    */
   uint32 max_clustering_id = 26;
 
+  /* Base path IDs whose intended location is relative to this manifest's
+   * dataset root.
+   *
+   * A value is the empty string for the main root or "tree/<branch>" for a
+   * branch. A missing key means the base is external/absolute and readers use
+   * `BasePath.path`. Writers set an entry only for a base created by a
+   * same-dataset `create_branch`; external bases, including shallow-clone
+   * sources, are not listed.
+   *
+   * `BasePath.path` remains the absolute location for readers that do not know
+   * this field. When a manifest is cloned into a different dataset, relative
+   * entries must be converted to absolute bindings before publication.
+   */
+  map<uint32, string> relative_base_paths = 27;
+
 } // Manifest
 
 // external dataset base path

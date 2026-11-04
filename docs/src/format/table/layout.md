@@ -63,6 +63,33 @@ The `path` field specifies an absolute path interpretable by the object store.
 The `is_dataset_root` field determines how the path is interpreted: when true, the path points to a dataset root with standard subdirectories (`data/`, `_deletions/`, `_indices/`); when false, the path points directly to a file directory without subdirectories.
 An optional `name` field provides a human-readable alias, which is particularly useful for referencing tags in shallow clones.
 
+### Relative base locations
+
+`Manifest.relative_base_paths` maps a base path ID to a location relative to
+the manifest's dataset root. The value is the empty string for the main root,
+or `tree/<branch>` for a branch. A missing entry means the base is external and
+readers resolve it through `BasePath.path`.
+
+`BasePath.path` remains the absolute location for readers that predate this
+field. Writers set an entry only for a base created by a same-dataset
+`create_branch`; external bases, including shallow-clone sources, are not
+listed. When a manifest is cloned into another dataset, relative entries must
+be converted to absolute bindings before publication. Manifests written before
+this field was introduced have no entries and keep resolving through
+`BasePath.path`.
+
+<details>
+<summary>Relative base path field</summary>
+
+```protobuf
+message Manifest {
+  // ... existing fields ...
+  map<uint32, string> relative_base_paths = 27;
+}
+```
+
+</details>
+
 <details>
 <summary>BasePath protobuf message</summary>
 
@@ -182,6 +209,7 @@ All file paths within Lance files are stored relative to their containing direct
 
 To port a dataset to a new location, simply copy all contents from the dataset root directory.
 The copied dataset will function immediately at the new location without any manifest updates, as all file references within the dataset root resolve through relative paths.
+Bases listed in `relative_base_paths` resolve under the copied root; bases without an entry keep their recorded absolute locations.
 
 When a dataset uses multiple base paths (such as in shallow clones or multi-bucket configurations), users have flexibility in how to port the dataset.
 The simplest approach is to copy only the dataset root, which preserves references to the original base path locations.

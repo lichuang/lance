@@ -111,6 +111,15 @@ pub struct Manifest {
     /* external base paths */
     pub base_paths: HashMap<u32, BasePath>,
 
+    /// Base path IDs whose intended location is relative to this dataset's
+    /// root.
+    ///
+    /// A value is `""` for main or `"tree/<branch>"` for a branch. A missing
+    /// key means the base is external/absolute and [`BasePath::path`] is used.
+    /// Only same-dataset `create_branch` bases are listed; external bases,
+    /// including shallow-clone sources, are not.
+    pub relative_base_paths: HashMap<u32, String>,
+
     /// Immutable clustering definitions referenced by fragment and index
     /// segment `clustering_id`. Every referenced definition stays in the
     /// manifest: a definition is removed only while nothing references it, and
@@ -226,6 +235,7 @@ impl Manifest {
             config: HashMap::new(),
             table_metadata: HashMap::new(),
             base_paths,
+            relative_base_paths: HashMap::new(),
             clustering: Vec::new(),
             max_clustering_id: 0,
             encoded_fragments: EncodedFragmentCache::default(),
@@ -261,10 +271,42 @@ impl Manifest {
             config: previous.config.clone(),
             table_metadata: previous.table_metadata.clone(),
             base_paths: previous.base_paths.clone(),
+            relative_base_paths: previous.relative_base_paths.clone(),
             clustering: previous.clustering.clone(),
             max_clustering_id: previous.max_clustering_id,
             encoded_fragments: EncodedFragmentCache::default(),
         }
+    }
+
+    /// Validate the relative base locations against the registered bases.
+    ///
+    /// Every key must name a dataset-root [`BasePath`]. A value is either the
+    /// empty string (main) or a `tree/<branch>` path with no empty, `.` or
+    /// `..` segments. A missing key is valid: that base is external/absolute.
+    pub fn validate_relative_base_paths(&self) -> Result<()> {
+        for (base_id, relative_path) in &self.relative_base_paths {
+            let base = self.base_paths.get(base_id).ok_or_else(|| {
+                Error::corrupt_file_named(
+                    "manifest relative_base_paths",
+                    format!("base id {base_id} is not present in base_paths"),
+                )
+            })?;
+            if !base.is_dataset_root {
+                return Err(Error::corrupt_file_named(
+                    "manifest relative_base_paths",
+                    format!("base id {base_id} is not a dataset root"),
+                ));
+            }
+            if !relative_path.is_empty()
+                && let Err(reason) = validate_relative_base_path(relative_path)
+            {
+                return Err(Error::corrupt_file_named(
+                    "manifest relative_base_paths",
+                    format!("base id {base_id}: {reason}"),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Performs a shallow_clone of the manifest entirely in memory without:
@@ -340,6 +382,10 @@ impl Manifest {
                 base_paths.insert(ref_base_id, base_path);
                 base_paths
             },
+            // The follow-up behavior change decides which entries a clone
+            // keeps and converts inherited ones to absolute bindings. Until
+            // then, a clone has no relative entries.
+            relative_base_paths: HashMap::new(),
             table_metadata: self.table_metadata.clone(),
             // The clone keeps the source fragments and segments, so it keeps
             // the definitions they reference and the allocation high-water mark.
@@ -801,6 +847,34 @@ impl DeepSizeOf for BasePath {
     }
 }
 
+/// Validate the relative location stored in `Manifest::relative_base_paths`.
+fn validate_relative_base_path(path: &str) -> std::result::Result<(), &'static str> {
+    if path.starts_with('/') {
+        return Err("must be relative to the dataset root");
+    }
+    if path.ends_with('/') {
+        return Err("must not end with '/'");
+    }
+    if path.contains('\\') {
+        return Err("must use '/' separators");
+    }
+    if path.contains('?') || path.contains('#') {
+        return Err("must not contain a URI query or fragment");
+    }
+
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+    {
+        return Err("must not contain empty, '.' or '..' segments");
+    }
+    if segments.first() != Some(&"tree") || segments.len() < 2 {
+        return Err("must be \"tree/<branch>\"");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, DeepSizeOf)]
 pub struct WriterVersion {
     pub library: String,
@@ -1168,7 +1242,7 @@ impl TryFrom<pb::Manifest> for Manifest {
 
         let schema = Schema::try_from(fields_with_meta)?;
 
-        Ok(Self {
+        let manifest = Self {
             schema,
             version: p.version,
             branch: p.branch,
@@ -1202,13 +1276,16 @@ impl TryFrom<pb::Manifest> for Manifest {
                 .iter()
                 .map(|item| (item.id, item.clone().into()))
                 .collect(),
+            relative_base_paths: p.relative_base_paths,
             clustering: p
                 .clustering
                 .into_iter()
                 .map(ClusteringDefinition::try_from)
                 .collect::<Result<Vec<_>>>()?,
             max_clustering_id: p.max_clustering_id,
-        })
+        };
+        manifest.validate_relative_base_paths()?;
+        Ok(manifest)
     }
 }
 
@@ -1288,6 +1365,7 @@ pub fn pb_manifest_without_fragments(m: &Manifest) -> pb::Manifest {
                 path: base_path.path.clone(),
             })
             .collect(),
+        relative_base_paths: m.relative_base_paths.clone(),
         transaction_section: m.transaction_section.map(|i| i as u64),
         transaction_section_deprecated: None,
     }
@@ -2312,5 +2390,122 @@ mod tests {
         //Just verify the transformation is OK
         let stats_map: BTreeMap<String, String> = deletion_summary.into();
         assert_eq!(stats_map.len(), 7)
+    }
+
+    fn manifest_with_relative_bases(
+        base_paths: HashMap<u32, BasePath>,
+        relative_base_paths: HashMap<u32, String>,
+    ) -> Manifest {
+        let mut manifest = Manifest::new(
+            Schema::default(),
+            Arc::new(vec![]),
+            DataStorageFormat::default(),
+            base_paths,
+        );
+        manifest.relative_base_paths = relative_base_paths;
+        manifest
+    }
+
+    #[test]
+    fn relative_base_paths_roundtrip() {
+        let base_paths = HashMap::from([
+            (
+                0,
+                BasePath::new(0, "s3://bucket/dataset".into(), None, true),
+            ),
+            (
+                1,
+                BasePath::new(
+                    1,
+                    "s3://bucket/dataset/tree/feature".into(),
+                    Some("feature".into()),
+                    true,
+                ),
+            ),
+        ]);
+        let relative = HashMap::from([(0, String::new()), (1, "tree/feature".to_string())]);
+        let manifest = manifest_with_relative_bases(base_paths, relative.clone());
+        manifest.validate_relative_base_paths().unwrap();
+
+        let encoded = pb_manifest_without_fragments(&manifest);
+        assert_eq!(encoded.relative_base_paths, relative);
+        let decoded = Manifest::try_from(encoded).unwrap();
+        assert_eq!(decoded.relative_base_paths, relative);
+    }
+
+    #[test]
+    fn relative_base_paths_default_to_empty() {
+        let manifest = Manifest::new(
+            Schema::default(),
+            Arc::new(vec![]),
+            DataStorageFormat::default(),
+            HashMap::new(),
+        );
+        assert!(manifest.relative_base_paths.is_empty());
+
+        let encoded = pb_manifest_without_fragments(&manifest);
+        assert!(encoded.relative_base_paths.is_empty());
+        let decoded = Manifest::try_from(encoded).unwrap();
+        assert!(decoded.relative_base_paths.is_empty());
+    }
+
+    #[test]
+    fn relative_base_paths_are_copied_to_the_next_version() {
+        let base_paths = HashMap::from([(
+            0,
+            BasePath::new(0, "s3://bucket/dataset".into(), None, true),
+        )]);
+        let manifest =
+            manifest_with_relative_bases(base_paths, HashMap::from([(0, String::new())]));
+        let next = Manifest::new_from_previous(&manifest, Schema::default(), Arc::new(vec![]));
+        assert_eq!(next.relative_base_paths, manifest.relative_base_paths);
+    }
+
+    #[test]
+    fn relative_base_paths_reject_unknown_and_non_root_bases() {
+        let unknown =
+            manifest_with_relative_bases(HashMap::new(), HashMap::from([(7, String::new())]));
+        let err = unknown.validate_relative_base_paths().unwrap_err();
+        assert!(matches!(err, Error::CorruptFile { .. }));
+        assert!(err.to_string().contains("base id 7"));
+
+        let non_root = manifest_with_relative_bases(
+            HashMap::from([(0, BasePath::new(0, "s3://bucket/data".into(), None, false))]),
+            HashMap::from([(0, String::new())]),
+        );
+        let err = non_root.validate_relative_base_paths().unwrap_err();
+        assert!(matches!(err, Error::CorruptFile { .. }));
+        assert!(err.to_string().contains("not a dataset root"));
+    }
+
+    #[test]
+    fn relative_base_paths_reject_invalid_locations() {
+        let base_paths = HashMap::from([(
+            0,
+            BasePath::new(0, "s3://bucket/dataset".into(), None, true),
+        )]);
+        for invalid in [
+            "/absolute",
+            "tree/",
+            "tree//feature",
+            "tree/./feature",
+            "tree/../feature",
+            "tree\\feature",
+            "tree/feature?query",
+            "tree/feature#fragment",
+            "other/feature",
+            "tree",
+        ] {
+            let manifest = manifest_with_relative_bases(
+                base_paths.clone(),
+                HashMap::from([(0, invalid.to_string())]),
+            );
+            let err = manifest.validate_relative_base_paths().unwrap_err();
+            assert!(matches!(err, Error::CorruptFile { .. }), "{invalid}");
+            assert!(
+                Manifest::try_from(pb_manifest_without_fragments(&manifest)).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }
